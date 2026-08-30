@@ -114,7 +114,6 @@ def sync_health_and_recovery(client, spreadsheet):
     existing_dates = set(sheet.col_values(1)[1:])
     new_rows = []
 
-    # Check the last 7 days for any missing recovery entries
     today = datetime.now().date()
     for day_offset in range(7, -1, -1):
         target_date = today - timedelta(days=day_offset)
@@ -123,67 +122,88 @@ def sync_health_and_recovery(client, spreadsheet):
         if date_str in existing_dates:
             continue
 
+        sleep_score, total_sleep, deep_sleep, rem_sleep, light_sleep, awake_sleep = "-", "-", "-", "-", "-", "-"
+        hrv_avg, hrv_status = "-", "-"
+        rhr_val = "-"
+        bb_peak, bb_low = "-", "-"
+        avg_stress = "-"
+        steps, active_cal = "-", "-"
+
+        # 1. Sleep
         try:
-            # 1. Sleep Data
             sleep_data = client.get_sleep_data(date_str) or {}
-            daily_sleep = sleep_data.get("dailySleepDTO", {})
+            daily_sleep = sleep_data.get("dailySleepDTO", {}) or {}
             sleep_score = daily_sleep.get("sleepScores", {}).get("overall", {}).get("value", "-")
             total_sleep = format_seconds_to_hhmm(daily_sleep.get("sleepTimeSeconds", 0))
             deep_sleep = format_seconds_to_hhmm(daily_sleep.get("deepSleepSeconds", 0))
             rem_sleep = format_seconds_to_hhmm(daily_sleep.get("remSleepSeconds", 0))
             light_sleep = format_seconds_to_hhmm(daily_sleep.get("lightSleepSeconds", 0))
             awake_sleep = format_seconds_to_hhmm(daily_sleep.get("awakeSleepSeconds", 0))
+        except Exception:
+            pass
 
-            # 2. HRV Data
+        # 2. HRV
+        try:
             hrv_data = client.get_hrv_data(date_str) or {}
             hrv_summary = hrv_data.get("hrvSummary", {}) or {}
             hrv_avg = hrv_summary.get("lastNightAvg", "-")
             hrv_status = hrv_summary.get("status", "-")
+        except Exception:
+            pass
 
-            # 3. Resting Heart Rate
+        # 3. Resting HR
+        try:
             rhr_data = client.get_rhr_day(date_str) or {}
             rhr_val = rhr_data.get("restingHeartRate", "-")
+        except Exception:
+            pass
 
-            # 4. Body Battery & Stress
+        # 4. Body Battery & Stress
+        try:
             bb_data = client.get_body_battery(date_str) or []
-            bb_peak = "-"
-            bb_low = "-"
-            if bb_data:
-                charged_vals = [entry.get("charged", 0) for entry in bb_data if "charged" in entry]
-                drained_vals = [entry.get("drained", 0) for entry in bb_data if "drained" in entry]
+            if isinstance(bb_data, list) and bb_data:
+                charged_vals = [e.get("charged", 0) for e in bb_data if isinstance(e, dict) and "charged" in e]
+                drained_vals = [e.get("drained", 0) for e in bb_data if isinstance(e, dict) and "drained" in e]
                 if charged_vals:
                     bb_peak = max(charged_vals)
                 if drained_vals:
                     bb_low = min(drained_vals)
+        except Exception:
+            pass
 
-            stress_data = client.get_daily_stress(date_str) or {}
-            avg_stress = stress_data.get("avgStressLevel", "-")
+        try:
+            stress_data = client.get_stress_data(date_str) or client.get_all_day_stress(date_str) or {}
+            if isinstance(stress_data, dict):
+                avg_stress = stress_data.get("avgStressLevel", stress_data.get("averageStressLevel", "-"))
+        except Exception:
+            pass
 
-            # 5. Steps & Active Calories
+        # 5. Steps & Active Calories
+        try:
             stats = client.get_stats(date_str) or {}
             steps = stats.get("totalSteps", "-")
             active_cal = stats.get("activeKilocalories", "-")
+        except Exception:
+            pass
 
-            new_rows.append([
-                date_str,
-                sleep_score,
-                total_sleep,
-                deep_sleep,
-                rem_sleep,
-                light_sleep,
-                awake_sleep,
-                hrv_avg,
-                hrv_status,
-                rhr_val,
-                bb_peak,
-                bb_low,
-                avg_stress,
-                steps,
-                active_cal,
-                ""  # Recovery Notes placeholder
-            ])
-        except Exception as err:
-            print(f"Health: Could not retrieve metrics for {date_str}: {err}")
+        new_rows.append([
+            date_str,
+            sleep_score,
+            total_sleep,
+            deep_sleep,
+            rem_sleep,
+            light_sleep,
+            awake_sleep,
+            hrv_avg,
+            hrv_status,
+            rhr_val,
+            bb_peak,
+            bb_low,
+            avg_stress,
+            steps,
+            active_cal,
+            ""
+        ])
 
     if new_rows:
         sheet.append_rows(new_rows)

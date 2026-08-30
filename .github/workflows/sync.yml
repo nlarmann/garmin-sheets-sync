@@ -2,9 +2,8 @@ name: Sync Garmin to Google Sheets
 
 on:
   schedule:
-    # Runs daily at 23:00 UTC (7:00 PM EDT / 6:00 PM EST)
     - cron: '0 23 * * *'
-  workflow_dispatch: # Allows you to still run it manually anytime
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -28,4 +27,6 @@ jobs:
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          CRONOMETER_EMAIL: ${{ secrets.CRONOMETER_EMAIL }}
+          CRONOMETER_PASSWORD: ${{ secrets.CRONOMETER_PASSWORD }}
         run: python sync_garmin.py
