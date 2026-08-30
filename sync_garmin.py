@@ -35,12 +35,56 @@ def format_seconds_to_hhmm(seconds):
 
 def format_pace(distance_meters, duration_seconds):
     if not distance_meters or not duration_seconds or distance_meters == 0:
-        return "-"
+        return "-", None
     miles = distance_meters / 1609.344
     pace_seconds = duration_seconds / miles
     mins = int(pace_seconds // 60)
     secs = int(pace_seconds % 60)
-    return f"{mins}:{secs:02d}"
+    return f"{mins}:{secs:02d}", pace_seconds
+
+
+def speed_to_pace(speed_mps):
+    """Converts meters per second to min/mile string and seconds per mile."""
+    if not speed_mps or speed_mps <= 0.5:
+        return "-", None
+    pace_sec = 1609.344 / speed_mps
+    mins = int(pace_sec // 60)
+    secs = int(pace_sec % 60)
+    return f"{mins}:{secs:02d}", pace_sec
+
+
+def classify_workout(act_type, dist_miles, avg_pace_sec, best_pace_sec, avg_hr, max_hr, avg_cadence, max_cadence, zone5_mins):
+    """Classifies workout type using interval and intensity signatures."""
+    if "run" not in act_type.lower():
+        return act_type.replace("_", " ").title()
+
+    if dist_miles >= 10.0:
+        return "Long Endurance Run"
+
+    hr_delta = (max_hr - avg_hr) if (isinstance(max_hr, (int, float)) and isinstance(avg_hr, (int, float))) else 0
+
+    # Interval / Sprint Detection Signature:
+    # 1. Large HR spike (>= 22 bpm difference between max and avg)
+    # 2. Significant time in Zone 5 (>= 0.5 min)
+    # 3. High max cadence (>= 185) with low average cadence (<= 150) from walk/rest periods
+    # 4. Very fast top speed (< 6:30 min/mi) with moderate/slow average pace (> 9:00 min/mi)
+    is_interval = (
+        hr_delta >= 22 or
+        (isinstance(zone5_mins, (int, float)) and zone5_mins >= 0.5) or
+        (isinstance(best_pace_sec, (int, float)) and best_pace_sec < 390 and (avg_pace_sec is None or avg_pace_sec > 540)) or
+        (isinstance(max_cadence, (int, float)) and max_cadence >= 185 and isinstance(avg_cadence, (int, float)) and avg_cadence <= 150)
+    )
+
+    if is_interval:
+        return "Interval / Sprints (VO2 Max)"
+
+    if isinstance(avg_hr, (int, float)) and avg_hr >= 160:
+        return "Tempo / Threshold Run"
+
+    if isinstance(avg_hr, (int, float)) and avg_hr < 148:
+        return "Easy / Base Aerobic"
+
+    return "Aerobic Endurance Run"
 
 
 # -------------------------------------------------------------
@@ -68,14 +112,50 @@ def sync_activities(client, spreadsheet):
         dist_miles = round(dist_meters / 1609.344, 2)
         duration_sec = act.get("duration", 0) or 0
         duration_formatted = str(timedelta(seconds=int(duration_sec)))
-        pace_formatted = format_pace(dist_meters, duration_sec) if "run" in act_type else "-"
+
+        # Paces
+        avg_pace_str, avg_pace_sec = format_pace(dist_meters, duration_sec) if "run" in act_type else ("-", None)
+        max_speed = act.get("maxSpeed", 0) or 0
+        best_pace_str, best_pace_sec = speed_to_pace(max_speed) if "run" in act_type else ("-", None)
+
+        # Heart Rate
         avg_hr = act.get("averageHR", "-")
         max_hr = act.get("maxHR", "-")
-        cadence = act.get("averageRunningCadenceInStepsPerMinute", "-")
+
+        # Cadence
+        avg_cadence = act.get("averageRunningCadenceInStepsPerMinute", "-")
+        max_cadence = act.get("maxRunningCadenceInStepsPerMinute", "-")
+
+        # Elevation & Training Effect
         elev_gain_meters = act.get("elevationGain", 0) or 0
         elev_gain_ft = round(elev_gain_meters * 3.28084, 0)
         aerobic_te = act.get("aerobicTrainingEffect", "-")
         anaerobic_te = act.get("anaerobicTrainingEffect", "-")
+
+        # Zone 5 Duration
+        zone5_mins = "-"
+        try:
+            hr_zones = client.get_activity_hr_in_timezones(act_id)
+            if hr_zones and isinstance(hr_zones, list):
+                for z in hr_zones:
+                    if z.get("zoneNumber") == 5:
+                        zone5_mins = round(z.get("secsInZone", 0) / 60.0, 1)
+                        break
+        except Exception:
+            pass
+
+        # Classification
+        classification = classify_workout(
+            act_type=act_type,
+            dist_miles=dist_miles,
+            avg_pace_sec=avg_pace_sec,
+            best_pace_sec=best_pace_sec,
+            avg_hr=avg_hr if isinstance(avg_hr, (int, float)) else None,
+            max_hr=max_hr if isinstance(max_hr, (int, float)) else None,
+            avg_cadence=avg_cadence if isinstance(avg_cadence, (int, float)) else None,
+            max_cadence=max_cadence if isinstance(max_cadence, (int, float)) else None,
+            zone5_mins=zone5_mins if isinstance(zone5_mins, (int, float)) else None
+        )
 
         new_rows.append([
             act_id,
@@ -84,14 +164,17 @@ def sync_activities(client, spreadsheet):
             name,
             dist_miles,
             duration_formatted,
-            pace_formatted,
+            avg_pace_str,
+            best_pace_str,
             avg_hr,
             max_hr,
-            cadence,
+            avg_cadence,
+            max_cadence,
             elev_gain_ft,
+            zone5_mins,
             aerobic_te,
             anaerobic_te,
-            ""  # Focus / Notes placeholder
+            classification
         ])
 
     if new_rows:
@@ -217,7 +300,7 @@ def sync_health_and_recovery(client, spreadsheet):
 # -------------------------------------------------------------
 def sync_cronometer(spreadsheet):
     if not CRONOMETER_EMAIL or not CRONOMETER_PASSWORD:
-        print("Cronometer: Credentials not set. Skipping nutrition sync.")
+        print("Cronometer: Credentials not set in env. Skipping nutrition sync.")
         return
 
     try:
@@ -230,7 +313,6 @@ def sync_cronometer(spreadsheet):
     session = requests.Session()
 
     try:
-        # Authenticate with Cronometer web API
         login_resp = session.post(
             "https://cronometer.com/login",
             data={"username": CRONOMETER_EMAIL, "password": CRONOMETER_PASSWORD},
@@ -243,7 +325,6 @@ def sync_cronometer(spreadsheet):
         today = datetime.now().date()
         new_rows = []
 
-        # Pull past 3 days to capture final food logging
         for day_offset in range(3, -1, -1):
             target_date = today - timedelta(days=day_offset)
             date_str = target_date.isoformat()
@@ -283,7 +364,7 @@ def sync_cronometer(spreadsheet):
                         TARGET_FAT,
                         fiber,
                         net_cals,
-                        ""  # Notes
+                        ""
                     ])
 
         if new_rows:
@@ -302,24 +383,17 @@ def main():
     if not SPREADSHEET_ID or not SERVICE_ACCOUNT_JSON:
         raise ValueError("Missing SPREADSHEET_ID or GCP_SERVICE_ACCOUNT_JSON.")
 
-    # Authorize Google Sheets
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     service_info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(service_info, scopes=scopes)
     gc = gspread.authorize(creds)
     spreadsheet = gc.open_by_key(SPREADSHEET_ID)
 
-    # Initialize Garmin Client
     client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
     client.login()
 
-    # 1. Activities Sync
     sync_activities(client, spreadsheet)
-
-    # 2. Health & Recovery Sync
     sync_health_and_recovery(client, spreadsheet)
-
-    # 3. Cronometer Sync
     sync_cronometer(spreadsheet)
 
 
