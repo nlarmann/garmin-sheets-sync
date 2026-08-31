@@ -1,5 +1,7 @@
 import os
 import json
+import csv
+from io import StringIO
 import requests
 import gspread
 from datetime import datetime, timedelta
@@ -311,65 +313,89 @@ def sync_cronometer(spreadsheet):
 
     existing_dates = set(sheet.col_values(1)[1:])
     session = requests.Session()
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
         login_resp = session.post(
             "https://cronometer.com/login",
             data={"username": CRONOMETER_EMAIL, "password": CRONOMETER_PASSWORD},
-            headers={"User-Agent": "Mozilla/5.0"}
+            headers=headers,
+            timeout=30,
         )
         if login_resp.status_code != 200:
-            print("Cronometer: Login failed. Check credentials.")
+            print(f"Cronometer: Login failed ({login_resp.status_code}). Check credentials or account access.")
             return
 
         today = datetime.now().date()
         new_rows = []
+        requested_dates = 0
+        failed_dates = []
 
         for day_offset in range(3, -1, -1):
             target_date = today - timedelta(days=day_offset)
             date_str = target_date.isoformat()
             if date_str in existing_dates:
                 continue
+            requested_dates += 1
 
             summary_resp = session.get(
                 f"https://cronometer.com/export?type=dailySummary&start={date_str}&end={date_str}",
-                headers={"User-Agent": "Mozilla/5.0"}
+                headers=headers,
+                timeout=30,
             )
 
-            if summary_resp.status_code == 200 and summary_resp.text.strip():
-                lines = summary_resp.text.strip().split("\n")
-                if len(lines) > 1:
-                    headers = [h.strip().strip('"') for h in lines[0].split(",")]
-                    values = [v.strip().strip('"') for v in lines[1].split(",")]
-                    data_dict = dict(zip(headers, values))
+            content_type = summary_resp.headers.get("Content-Type", "").lower()
+            if summary_resp.status_code != 200 or "text/html" in content_type:
+                failed_dates.append(f"{date_str} (HTTP {summary_resp.status_code})")
+                continue
 
-                    weight = data_dict.get("Weight (lbs)", data_dict.get("Weight", "-"))
-                    consumed_cals = float(data_dict.get("Energy (kcal)", 0) or 0)
-                    protein = float(data_dict.get("Protein (g)", 0) or 0)
-                    carbs = float(data_dict.get("Net Carbs (g)", data_dict.get("Carbs (g)", 0)) or 0)
-                    fat = float(data_dict.get("Fat (g)", 0) or 0)
-                    fiber = float(data_dict.get("Fiber (g)", 0) or 0)
-                    net_cals = consumed_cals - TARGET_CALORIES
+            rows = list(csv.DictReader(StringIO(summary_resp.text)))
+            if not rows:
+                continue
 
-                    new_rows.append([
-                        date_str,
-                        weight,
-                        consumed_cals,
-                        TARGET_CALORIES,
-                        protein,
-                        TARGET_PROTEIN,
-                        carbs,
-                        TARGET_CARBS,
-                        fat,
-                        TARGET_FAT,
-                        fiber,
-                        net_cals,
-                        ""
-                    ])
+            data_dict = rows[0]
+
+            def numeric_value(*keys):
+                for key in keys:
+                    value = (data_dict.get(key) or "").strip()
+                    if value and value not in {"-", "--"}:
+                        try:
+                            return float(value.replace(",", ""))
+                        except ValueError:
+                            pass
+                return 0.0
+
+            weight = data_dict.get("Weight (lbs)", data_dict.get("Weight", "-")) or "-"
+            consumed_cals = numeric_value("Energy (kcal)")
+            protein = numeric_value("Protein (g)")
+            carbs = numeric_value("Net Carbs (g)", "Carbs (g)")
+            fat = numeric_value("Fat (g)")
+            fiber = numeric_value("Fiber (g)")
+            net_cals = consumed_cals - TARGET_CALORIES
+
+            new_rows.append([
+                date_str,
+                weight,
+                consumed_cals,
+                TARGET_CALORIES,
+                protein,
+                TARGET_PROTEIN,
+                carbs,
+                TARGET_CARBS,
+                fat,
+                TARGET_FAT,
+                fiber,
+                net_cals,
+                ""
+            ])
 
         if new_rows:
             sheet.append_rows(new_rows)
             print(f"Cronometer: Appended {len(new_rows)} nutrition entries.")
+        elif failed_dates:
+            print(f"Cronometer: Could not fetch nutrition data for {', '.join(failed_dates)}.")
+        elif requested_dates:
+            print("Cronometer: No nutrition rows returned for the requested dates.")
         else:
             print("Cronometer: Nutrition data up to date.")
     except Exception as e:
