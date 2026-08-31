@@ -2,7 +2,7 @@ name: Sync Garmin to Google Sheets
 
 on:
   schedule:
-    - cron: '0 23 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 jobs:
